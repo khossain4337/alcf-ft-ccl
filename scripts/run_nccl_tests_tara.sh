@@ -10,6 +10,7 @@ export LD_LIBRARY_PATH=$SOFT/repositories/nccl_2.32.6-1/build_cu13.0/lib:$CUDA_H
 export NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ENV,NET NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
 if [ "$NET" = ofi ]; then
   export NCCL_NET_PLUGIN=$SOFT/repositories/aws_nccl_ofi_v1.22.0/v1.22.0_lf2.3.1_cu13.0/lib/libnccl-net-ofi.so
+  export LD_LIBRARY_PATH=$SOFT/repositories/libfabric_v2.7.0/v2.7.0_cu13.0/lib:$LD_LIBRARY_PATH
   export NCCL_CROSS_NIC=1 NCCL_NET_GDR_LEVEL=PHB
   export FI_MR_CACHE_MONITOR=userfaultfd FI_CXI_DISABLE_HOST_REGISTER=1 FI_CXI_DEFAULT_CQ_SIZE=131072 \
     FI_CXI_RDZV_PROTO=alt_read FI_CXI_RDZV_EAGER_SIZE=0 FI_CXI_RDZV_THRESHOLD=0 FI_CXI_RDZV_GET_MIN=0 \
