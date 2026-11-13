@@ -11,8 +11,9 @@ CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/25.9/cuda/13.0
 CXX=/opt/cray/pe/gcc-native/14/bin/g++
 
 mkdir -p "$(dirname "$LOG")"
+exec > >(tee "$LOG") 2>&1
 cd "$SRC"
 make -j 32 src.build CUDA_HOME=$CUDA_HOME CXX=$CXX BUILDDIR="$OUT" \
-  NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90" 2>&1 | tee "$LOG" | tail -20
+  NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90"
 ls "$OUT/lib"
 grep -c ncclCommGrow "$OUT/include/nccl.h"
