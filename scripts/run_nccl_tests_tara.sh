@@ -5,7 +5,8 @@ NET=$1; shift; TESTS=${*:-all_reduce}
 SOFT=/vast/draco/tara/projects/Tara_Deployment/software
 B=$SOFT/repositories/nccl-tests_v2.21.1/build_nccl2.32.6-1_cu13.0
 NN=$(sort -u $PBS_NODEFILE | wc -l)
-export LD_LIBRARY_PATH=$SOFT/repositories/nccl_2.32.6-1/build_cu13.0/lib:$LD_LIBRARY_PATH
+CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/25.9/cuda/13.0
+export LD_LIBRARY_PATH=$SOFT/repositories/nccl_2.32.6-1/build_cu13.0/lib:$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 export NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ENV,NET NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
 if [ "$NET" = ofi ]; then
   export NCCL_NET_PLUGIN=$SOFT/repositories/aws_nccl_ofi_v1.22.0/v1.22.0_lf2.3.1_cu13.0/lib/libnccl-net-ofi.so
@@ -22,7 +23,7 @@ OUT=$SOFT/testing/nccl_tests_runs/${NET}_${NN}n_$(date +%Y%m%d-%H%M%S); mkdir -p
   [ -n "$NCCL_NET_PLUGIN" ] && ldd $NCCL_NET_PLUGIN | grep -E 'libfabric|not found'; } | tee $OUT/ldd.txt
 for t in $TESTS; do
   mpiexec -n $((4*NN)) --ppn 4 --envall $VNI --cpu-bind list:0-71:72-143:144-215:216-287 \
-    $B/${t}_perf -b 8 -e 4G -f 2 -g 1 -n 50 -w 10 > $OUT/$t.log 2>&1
+    $B/${t}_perf -b 8 -e 4G -f 2 -g 1 -n 50 -w 10 2>&1 | tee $OUT/$t.log
 done
 for f in $OUT/*.log; do echo "== $(basename $f .log)"; grep -m1 'NCCL version' $f
   grep -m2 -E 'Loaded net plugin|Using network' $f; grep -E '^ +4294967296 |Out of bounds|Avg bus' $f
