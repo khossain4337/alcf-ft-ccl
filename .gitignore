@@ -4,4 +4,5 @@
 !.gitignore
 !README.md
 !scripts/*.sh
+!scripts/functionality/*.sh
 !src/*.cpp
