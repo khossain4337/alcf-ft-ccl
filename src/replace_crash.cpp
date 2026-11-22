@@ -127,20 +127,20 @@ int main(int argc, char** argv) {
     std::iota(cur.begin(), cur.end(), 0);
     ok &= check(old, pos, cur, d, s);
     lap("coll6");
-    auto batch = [&] {  // errors are left to the detect loop: the victim may die mid-enqueue
-      for (int i = 0; i < kIters; i++) {
+    auto batch = [&](int iters) {  // errors are left to the detect loop: the victim may die mid-enqueue
+      for (int i = 0; i < iters; i++) {
         ncclResult_t a = ncclAllReduce(buf, buf, kCount, ncclFloat, ncclSum, old, s);
         while (a == ncclInProgress) NCCL(ncclCommGetAsyncError(old, &a));  // next call fails while InProgress
         if (a != ncclSuccess) break;
       }
     };
-    batch();  // warm-up = the crash op, so nothing connects lazily after the crash
+    batch(kIters);  // warm-up = the crash op, so nothing connects lazily after the crash
     CUDA(cudaStreamSynchronize(s));
     lap("warm");
 
     if (pos == victim) {
       if (!hang) {
-        batch();
+        batch(kIters / 2);  // half: peers' later ops can never finish, whatever the timing
         usleep(20000);
         printf("pos %d victim kill%s\n", pos, times.c_str());
         fflush(stdout);
@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
     }
 
     // Detect: async error, a peer's notice, or the deadline.
-    batch();
+    batch(kIters);
     auto t0 = clk::now();
     auto since = [&] { return sec(clk::now() - t0).count(); };
     double tAsync = -1, nextStore = 0;
