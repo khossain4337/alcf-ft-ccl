@@ -1,6 +1,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <dirent.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -14,6 +16,15 @@
 
 using clk = std::chrono::steady_clock;
 static double since(clk::time_point t) { return std::chrono::duration<double>(clk::now() - t).count(); }
+
+// readdir, not a name lookup: NFS caches "not found" for ~30 s on other nodes (DECISIONS_2026_11_22a).
+static bool listed(const char* dir, const char* name) {
+  DIR* d = opendir(dir);
+  bool found = false;
+  for (dirent* e; d && !found && (e = readdir(d));) found = !strcmp(e->d_name, name);
+  if (d) closedir(d);
+  return found;
+}
 
 static int env(const char* name) {
   const char* v = getenv(name);
@@ -39,12 +50,12 @@ int main(int argc, char** argv) {
       return 1;
     }
   } else {
-    FILE* f;
-    while (!(f = fopen(idPath.c_str(), "rb"))) {
+    while (!listed(argv[1], "id")) {
       if (since(t) > 60) { fprintf(stderr, "rank %d: no %s after 60 s\n", rank, idPath.c_str()); return 1; }
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    if (fread(&id, sizeof id, 1, f) != 1) { fprintf(stderr, "rank %d: short read\n", rank); return 1; }
+    FILE* f = fopen(idPath.c_str(), "rb");
+    if (!f || fread(&id, sizeof id, 1, f) != 1) { fprintf(stderr, "rank %d: cannot read %s\n", rank, idPath.c_str()); return 1; }
     fclose(f);
   }
   double tId = since(t);
