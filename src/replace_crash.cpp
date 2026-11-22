@@ -211,18 +211,22 @@ int main(int argc, char** argv) {
     ncclResult_t sr = ncclCommShrink(old, &victim, 1, &shr, &cfg, NCCL_SHRINK_ABORT);
     bool shrunk = sr == ncclSuccess || sr == ncclInProgress;
     std::string why = shrunk ? "" : ncclGetErrorString(sr);
+    // shr stays NULL until the child's init ends; its progress shows on the parent (init.cc:2360, group.cc:1120).
     for (auto t1 = clk::now(); shrunk;) {
       ncclResult_t a;
-      NCCL(ncclCommGetAsyncError(shr, &a));
-      if (a == ncclSuccess) break;
-      if (a != ncclInProgress) why = ncclGetErrorString(a);
+      NCCL(ncclCommGetAsyncError(old, &a));
+      if (a == ncclSuccess && shr) break;
+      if (a != ncclSuccess && a != ncclInProgress) why = ncclGetErrorString(a);
       else if (st.wait("shrinkfail", 0)) why = "peer";
       else if (clk::now() - t1 > sec(60)) why = "timeout";
       else { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
       shrunk = false;
     }
-    if (!shrunk && why != "peer") st.put("shrinkfail", std::to_string(pos));
-    if (!shrunk && shr) NCCL(ncclCommAbort(shr));
+    if (!shrunk) {
+      if (why != "peer") st.put("shrinkfail", std::to_string(pos));
+      NCCL(ncclCommAbort(old));  // also aborts the child's init and waits for it
+      if (shr) NCCL(ncclCommAbort(shr));  // published when its init ended
+    }
     lap(shrunk ? "shrink" : "shrinkfail");
     // Outcomes are final once written, so all survivors pick the same path.
     st.put("shrunk." + std::to_string(pos), shrunk ? "ok" : why);
@@ -234,7 +238,7 @@ int main(int argc, char** argv) {
     }
     lap("barrier");
     if (shrunk && !all) NCCL(ncclCommAbort(shr));
-    NCCL(ncclCommAbort(old));
+    if (shrunk) NCCL(ncclCommAbort(old));
     lap("abort");
     CUDA(cudaStreamSynchronize(s));
     lap("drain");
