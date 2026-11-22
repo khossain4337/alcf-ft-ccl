@@ -9,17 +9,35 @@
 #include <iterator>
 #include <string>
 #include <thread>
+#include <unistd.h>
 
 struct Store {
   std::string dir;
 
-  void put(const std::string& key, const std::string& val) const {
-    std::string path = dir + "/" + key, tmp = path + ".tmp";  // rename is atomic: no partial reads
+  // Tmp name per process: some keys have many writers (DECISIONS_2026_11_22c).
+  std::string write(const std::string& key, const std::string& val) const {
+    std::string tmp = dir + "/" + key + ".tmp." + std::to_string(getpid());
     FILE* f = fopen(tmp.c_str(), "wb");
-    if (!f || fwrite(val.data(), 1, val.size(), f) != val.size() || fclose(f) || rename(tmp.c_str(), path.c_str())) {
+    if (!f || fwrite(val.data(), 1, val.size(), f) != val.size() || fclose(f)) {
       perror(tmp.c_str());
       exit(1);
     }
+    return tmp;
+  }
+
+  void put(const std::string& key, const std::string& val) const {
+    std::string tmp = write(key, val);
+    if (rename(tmp.c_str(), (dir + "/" + key).c_str())) {  // rename is atomic: no partial reads
+      perror(tmp.c_str());
+      exit(1);
+    }
+  }
+
+  // First writer wins (link is atomic on NFS). Result ignored: a retransmit can fake EEXIST; read the key back.
+  void putOnce(const std::string& key, const std::string& val) const {
+    std::string tmp = write(key, val);
+    (void)link(tmp.c_str(), (dir + "/" + key).c_str());
+    unlink(tmp.c_str());
   }
 
   // readdir, not a name lookup: NFS caches "not found" for ~30 s on other nodes.

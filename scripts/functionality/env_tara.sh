@@ -16,4 +16,4 @@ else
 fi
 export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
 [[ $1 = /* ]] || set -- "$B/$1" "${@:2}"
-mpiexec -n ${NP:-1} --ppn 4 --envall "$@"
+mpiexec -n ${NP:-1} --ppn 4 $MPIEXEC_ARGS --envall "$@"
