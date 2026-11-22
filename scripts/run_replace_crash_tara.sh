@@ -16,9 +16,9 @@ for NET in ${@:-socket ofi}; do
     MPIEXEC_ARGS=--no-abort-on-failure NP=$((4*NN)) NET=$NET \
     timeout 300 bash $S/functionality/env_tara.sh $BIN $OUT $V $M $DL > $OUT/run.log 2>&1
   echo "== $NET victim $V $M deadline $DL rc=$? (nonzero expected: a rank died) $OUT"
-  { cat $OUT/nccl.* | grep -m1 'NCCL version'
-    cat $OUT/nccl.* | grep -m1 'Using network'
-    cat $OUT/nccl.* | grep -m1 'CUMEM'
+  { awk '/NCCL version/{print; exit}' $OUT/nccl.*  # awk, not cat|grep -m1: SIGPIPE is ignored in jobs
+    awk '/Using network/{print; exit}' $OUT/nccl.*
+    awk '/CUMEM/{print; exit}' $OUT/nccl.*
     grep -E '^(pos|spare) |\.(cpp|h):[0-9]+ ' $OUT/run.log | sort -n -k2
     echo "exclude: $(cat $OUT/exclude)"
     for f in $OUT/shrunk.*; do echo "${f##*/}: $(cat $f)"; done

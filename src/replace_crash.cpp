@@ -116,14 +116,24 @@ int main(int argc, char** argv) {
       if (!st.wait("id0", 60)) { fprintf(stderr, "pos %d: no id0 after 60 s\n", pos); return 1; }
       id = toId(st.get("id0"));
     }
+    // Nonblocking: Shrink takes its blocking mode from the parent, not the child config (DECISIONS_2026_11_22c).
+    ncclConfig_t cfg = NCCL_CONFIG_INITIALIZER;
+    cfg.blocking = 0;
     ncclComm_t old;
-    NCCL(ncclCommInitRank(&old, nAct, id, pos));
+    NCCL(ncclCommInitRankConfig(&old, nAct, id, pos, &cfg));
+    ready(old);
     lap("init");
     std::vector<int> cur(nAct);
     std::iota(cur.begin(), cur.end(), 0);
     ok &= check(old, pos, cur, d, s);
     lap("coll6");
-    auto batch = [&] { for (int i = 0; i < kIters; i++) NCCL(ncclAllReduce(buf, buf, kCount, ncclFloat, ncclSum, old, s)); };
+    auto batch = [&] {  // errors are left to the detect loop: the victim may die mid-enqueue
+      for (int i = 0; i < kIters; i++) {
+        ncclResult_t a = ncclAllReduce(buf, buf, kCount, ncclFloat, ncclSum, old, s);
+        while (a == ncclInProgress) NCCL(ncclCommGetAsyncError(old, &a));  // next call fails while InProgress
+        if (a != ncclSuccess) break;
+      }
+    };
     batch();  // warm-up = the crash op, so nothing connects lazily after the crash
     CUDA(cudaStreamSynchronize(s));
     lap("warm");
@@ -154,7 +164,7 @@ int main(int argc, char** argv) {
     auto pollAsync = [&] {
       ncclResult_t a;
       NCCL(ncclCommGetAsyncError(old, &a));
-      if (a != ncclSuccess && tAsync < 0) tAsync = since();
+      if (a != ncclSuccess && a != ncclInProgress && tAsync < 0) tAsync = since();
     };
     std::string by;
     while (by.empty()) {
@@ -197,8 +207,6 @@ int main(int argc, char** argv) {
     lap("agree");
 
     // Nonblocking Shrink; if any survivor fails (sticky async error), all re-init. See DECISIONS_2026_11_22c.
-    ncclConfig_t cfg = NCCL_CONFIG_INITIALIZER;
-    cfg.blocking = 0;
     ncclComm_t shr = nullptr;
     ncclResult_t sr = ncclCommShrink(old, &victim, 1, &shr, &cfg, NCCL_SHRINK_ABORT);
     bool shrunk = sr == ncclSuccess || sr == ncclInProgress;
