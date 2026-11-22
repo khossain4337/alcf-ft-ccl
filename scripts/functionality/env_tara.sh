@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: [NP=n] [NET=socket|ofi] bash env_tara.sh <nccl-tests binary> [args]; env stays in this process.
+# Usage: [NP=n] [NET=socket|ofi] bash env_tara.sh <nccl-tests binary | /abs/path> [args]; env stays in this process.
 SOFT=/vast/draco/tara/projects/Tara_Deployment/software
 CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/25.9/cuda/13.0
 export LD_LIBRARY_PATH=$SOFT/repositories/nccl_2.32.6-1/build_cu13.0/lib:$CUDA_HOME/lib64:$LD_LIBRARY_PATH
@@ -15,4 +15,5 @@ else
   export NCCL_NET=Socket
 fi
 export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
-mpiexec -n ${NP:-1} --ppn 4 --envall $B/"$@"
+[[ $1 = /* ]] || set -- "$B/$1" "${@:2}"
+mpiexec -n ${NP:-1} --ppn 4 --envall "$@"
