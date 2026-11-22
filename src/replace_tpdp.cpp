@@ -1,6 +1,7 @@
 // TP+DP crash replace: 2 comms per rank on one stream; stop all, rebuild each, Grow the spare into
 // the victim's two comms. Design: DECISIONS_2026_11_23a.
 #include <algorithm>
+#include <atomic>
 #include <signal.h>
 #include <sstream>
 #include <vector>
@@ -18,6 +19,7 @@
 using clk = std::chrono::steady_clock;
 using sec = std::chrono::duration<double>;
 static const int kSteps = 25;           // x2 ops: same op count as 22d
+static const int kDeep = 2000;          // fullqueue: should fill NCCL's queue; check "queued"
 static const size_t kCount = 64 << 20;  // 256 MiB of float
 static const double kGrace = 3;
 
@@ -45,6 +47,7 @@ static std::vector<int> ints(const std::string& s) {
   return v;
 }
 static int idx(const std::vector<int>& v, int x) { return int(std::find(v.begin(), v.end(), x) - v.begin()); }
+static void tick(void* n) { ++*static_cast<std::atomic<int>*>(n); }
 
 static void ready(ncclComm_t c) {
   ncclResult_t a;
@@ -71,13 +74,14 @@ struct Comm {
 };
 
 int main(int argc, char** argv) {
-  if (argc < 2) DIE("usage: %s <fresh run dir> [victim position] [revoke|abort] [deadline s]", argv[0]);
+  if (argc < 2) DIE("usage: %s <fresh run dir> [victim position] [revoke|abort] [deadline s] [mainthread|fullqueue]", argv[0]);
   Store st{argv[1]};
   int prank = env("PALS_RANKID"), n = env("PMI_SIZE"), local = env("PALS_LOCAL_RANKID"), L = env("PALS_LOCAL_SIZE");
   int T = L - 1, N = n / L, nAct = N * T, node = prank / L;  // assumes --ppn block placement
   int victim = argc > 2 ? atoi(argv[2]) : 1;
   bool revoke = !(argc > 3 && !strcmp(argv[3], "abort"));
   double deadline = argc > 4 ? atof(argv[4]) : 10;
+  bool full = argc > 5 && !strcmp(argv[5], "fullqueue");
   if (victim < 0 || victim >= nAct) DIE("victim must be in [0, %d)", nAct);
   bool isSpare = local == T;
   int pos = isSpare ? -1 : node * T + local;
@@ -132,14 +136,18 @@ int main(int argc, char** argv) {
     lap("init");
     for (Comm* c : comms) ok &= check(c->c, pos, c->mem, d, s);
     lap("coll");
+    std::atomic<bool> stop{false}, feeding{false};
+    std::atomic<int> done{0}, queued{0};  // fullqueue: steps finished on the GPU / enqueued
     auto enq = [&](Comm& c) {  // errors are left to the detect loop
       ncclResult_t a = ncclAllReduce(buf, buf, kCount, ncclFloat, ncclSum, c.c, s);
-      while (a == ncclInProgress) NCCL(ncclCommGetAsyncError(c.c, &a));
+      while (a == ncclInProgress && !stop) NCCL(ncclCommGetAsyncError(c.c, &a));
       return a == ncclSuccess;
     };
     auto batch = [&](int steps) {
-      for (int i = 0; i < steps; i++)
+      for (int i = 0; i < steps && !stop; i++, queued++) {
         if (!enq(tp) || !enq(dp)) return;
+        if (full) CUDA(cudaLaunchHostFunc(s, tick, &done));
+      }
     };
     batch(kSteps);  // warm-up = the crash ops, so nothing connects lazily after the crash
     CUDA(cudaStreamSynchronize(s));
@@ -154,10 +162,17 @@ int main(int argc, char** argv) {
     }
 
     // Detect: async error on either comm, a peer's notice, or the deadline.
-    batch(kSteps);
+    // fullqueue: a feeder thread enqueues until NCCL's queue is full; deadline counts from the last finished step.
+    queued = 0;
+    std::thread feeder;
+    if (full) {
+      feeding = true;
+      feeder = std::thread([&] { batch(kDeep); feeding = false; });
+    } else batch(kSteps);
     auto t0 = clk::now();
     auto since = [&] { return sec(clk::now() - t0).count(); };
-    double tAsync = -1, nextStore = 0;
+    double tAsync = -1, nextStore = 0, tProg = 0;
+    int seen = done;
     std::string asyncOn = "-";
     auto pollAsync = [&] {
       for (Comm* c : comms) {
@@ -169,15 +184,21 @@ int main(int argc, char** argv) {
     std::string by;
     while (by.empty()) {
       cudaError_t q = cudaStreamQuery(s);
-      if (q == cudaSuccess) { printf("pos %d batch finished, no failure seen%s\n", pos, times.c_str()); return 1; }
+      if (q == cudaSuccess && !feeding) {
+        if (feeder.joinable()) feeder.join();
+        printf("pos %d batch finished, no failure seen%s\n", pos, times.c_str());
+        return 1;
+      }
       if (q != cudaErrorNotReady) CUDA(q);  // local fatal error, not a peer failure
       pollAsync();
+      if (done != seen) { seen = done; tProg = since(); }
       if (tAsync >= 0) by = "async";
-      else if (since() > deadline) by = "deadline";
+      else if (since() - tProg > deadline) by = "deadline";
       else if (since() > nextStore) { nextStore = since() + 0.01; if (st.wait("fail", 0)) by = "notice"; }
       else std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     lap("detect");
+    int qDet = queued;
     if (by != "notice") st.put("fail", by);
     st.put("alive." + std::to_string(pos), "");
     for (double tDet = since(); since() < tDet + kGrace;) {
@@ -185,8 +206,8 @@ int main(int argc, char** argv) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     lap("grace");
-    char b[96];
-    snprintf(b, sizeof b, " by %s async %.3f on %s", by.c_str(), tAsync, asyncOn.c_str());
+    char b[128];
+    snprintf(b, sizeof b, " by %s async %.3f on %s queued %d", by.c_str(), tAsync, asyncOn.c_str(), qDet);
     times += b;
 
     // Agree: missing alive files = exclude; first writer wins.
@@ -201,6 +222,9 @@ int main(int argc, char** argv) {
     lap("agree");
 
     // Stop all comms before draining any: draining one waits on the other's kernels on our stream.
+    // The feeder leaves first, so no thread is inside an NCCL call on a comm being stopped.
+    stop = true;
+    if (feeder.joinable()) feeder.join();
     std::vector<std::string> why(comms.size());
     if (revoke) {
       for (size_t i = 0; i < comms.size(); i++) {
