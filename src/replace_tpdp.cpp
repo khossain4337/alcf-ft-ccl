@@ -225,9 +225,11 @@ int main(int argc, char** argv) {
     lap("agree");
 
     // Stop all comms before draining any: draining one waits on the other's kernels on our stream.
-    // The feeder leaves NCCL first; it is joined last, as it may be stuck in cudaLaunchHostFunc on the full queue.
+    // fullqueue: the feeder may be stuck in GetAsyncError's join, which only stop-all ends. Wait 1 s, then
+    // stop anyway (use-after-free in 2.32.6, DECISIONS_2026_11_23c). Joined last: it may sit in cudaLaunchHostFunc.
     stop = true;
-    while (inNccl) std::this_thread::yield();
+    for (auto t1 = clk::now(); inNccl && clk::now() - t1 < sec(1);) std::this_thread::yield();
+    if (full) times += inNccl ? " feederIn 1" : " feederIn 0";
     std::vector<std::string> why(comms.size());
     auto stopOne = [&](size_t i) {
       if (!revoke) {
