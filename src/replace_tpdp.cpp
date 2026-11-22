@@ -202,10 +202,15 @@ int main(int argc, char** argv) {
 
     // Stop all comms before draining any: draining one waits on the other's kernels on our stream.
     std::vector<std::string> why(comms.size());
-    for (size_t i = 0; i < comms.size(); i++) {
-      ncclResult_t res = revoke ? ncclCommRevoke(comms[i]->c, NCCL_REVOKE_DEFAULT) : ncclCommAbort(comms[i]->c);
-      if (res != ncclSuccess && res != ncclInProgress) why[i] = ncclGetErrorString(res);
-      if (!revoke) comms[i]->c = nullptr;
+    if (revoke) {
+      for (size_t i = 0; i < comms.size(); i++) {
+        ncclResult_t res = ncclCommRevoke(comms[i]->c, NCCL_REVOKE_DEFAULT);
+        if (res != ncclSuccess && res != ncclInProgress) why[i] = ncclGetErrorString(res);
+      }
+    } else {  // Abort drains before it returns, even nonblocking (group.cc:56): one thread per comm
+      std::vector<std::thread> th;
+      for (Comm* c : comms) th.emplace_back([c] { ncclCommAbort(c->c); c->c = nullptr; });
+      for (auto& x : th) x.join();
     }
     for (size_t i = 0; revoke && i < comms.size(); i++) {
       ncclResult_t a = ncclInProgress;
