@@ -136,11 +136,13 @@ int main(int argc, char** argv) {
     lap("init");
     for (Comm* c : comms) ok &= check(c->c, pos, c->mem, d, s);
     lap("coll");
-    std::atomic<bool> stop{false}, feeding{false};
+    std::atomic<bool> stop{false}, feeding{false}, inNccl{false};
     std::atomic<int> done{0}, queued{0};  // fullqueue: steps finished on the GPU / enqueued
     auto enq = [&](Comm& c) {  // errors are left to the detect loop
-      ncclResult_t a = ncclAllReduce(buf, buf, kCount, ncclFloat, ncclSum, c.c, s);
+      inNccl = true;  // set before reading stop; main sets stop, then waits for false
+      ncclResult_t a = stop ? ncclInvalidUsage : ncclAllReduce(buf, buf, kCount, ncclFloat, ncclSum, c.c, s);
       while (a == ncclInProgress && !stop) NCCL(ncclCommGetAsyncError(c.c, &a));
+      inNccl = false;
       return a == ncclSuccess;
     };
     auto batch = [&](int steps) {
@@ -163,7 +165,7 @@ int main(int argc, char** argv) {
 
     // Detect: async error on either comm, a peer's notice, or the deadline.
     // fullqueue: a feeder thread enqueues until NCCL's queue is full; deadline counts from the last finished step.
-    queued = 0;
+    queued = done = 0;
     std::thread feeder;
     if (full) {
       feeding = true;
@@ -183,8 +185,9 @@ int main(int argc, char** argv) {
     };
     std::string by;
     while (by.empty()) {
-      cudaError_t q = cudaStreamQuery(s);
-      if (q == cudaSuccess && !feeding) {
+      // fullqueue: no CUDA call here; it waits on a lock held by NCCL's launch, stuck on the full CUDA queue (23b).
+      cudaError_t q = full ? cudaErrorNotReady : cudaStreamQuery(s);
+      if (full ? !feeding && done == queued : q == cudaSuccess) {
         if (feeder.joinable()) feeder.join();
         printf("pos %d batch finished, no failure seen%s\n", pos, times.c_str());
         return 1;
@@ -222,18 +225,25 @@ int main(int argc, char** argv) {
     lap("agree");
 
     // Stop all comms before draining any: draining one waits on the other's kernels on our stream.
-    // The feeder leaves first, so no thread is inside an NCCL call on a comm being stopped.
+    // The feeder leaves NCCL first; it is joined last, as it may be stuck in cudaLaunchHostFunc on the full queue.
     stop = true;
-    if (feeder.joinable()) feeder.join();
+    while (inNccl) std::this_thread::yield();
     std::vector<std::string> why(comms.size());
-    if (revoke) {
-      for (size_t i = 0; i < comms.size(); i++) {
-        ncclResult_t res = ncclCommRevoke(comms[i]->c, NCCL_REVOKE_DEFAULT);
-        if (res != ncclSuccess && res != ncclInProgress) why[i] = ncclGetErrorString(res);
+    auto stopOne = [&](size_t i) {
+      if (!revoke) {
+        ncclCommAbort(comms[i]->c);
+        comms[i]->c = nullptr;
+        return;
       }
-    } else {  // Abort drains before it returns, even nonblocking (group.cc:56): one thread per comm
+      ncclResult_t res = ncclCommRevoke(comms[i]->c, NCCL_REVOKE_DEFAULT);
+      if (res != ncclSuccess && res != ncclInProgress) why[i] = ncclGetErrorString(res);
+    };
+    // Serial calls deadlock when a call waits in the caller: Abort always drains there (group.cc:56);
+    // fullqueue Revoke joins the launch stuck on the full queue. Then one thread per comm.
+    if (revoke && !full) for (size_t i = 0; i < comms.size(); i++) stopOne(i);
+    else {
       std::vector<std::thread> th;
-      for (Comm* c : comms) th.emplace_back([c] { ncclCommAbort(c->c); c->c = nullptr; });
+      for (size_t i = 0; i < comms.size(); i++) th.emplace_back(stopOne, i);
       for (auto& x : th) x.join();
     }
     for (size_t i = 0; revoke && i < comms.size(); i++) {
@@ -241,6 +251,7 @@ int main(int argc, char** argv) {
       while (why[i].empty() && a == ncclInProgress) NCCL(ncclCommGetAsyncError(comms[i]->c, &a));
       if (why[i].empty() && a != ncclSuccess) why[i] = ncclGetErrorString(a);  // e.g. sticky proxy error
     }
+    if (feeder.joinable()) feeder.join();
     lap(revoke ? "revoke" : "abort");
     CUDA(cudaStreamSynchronize(s));
     lap("drain");
