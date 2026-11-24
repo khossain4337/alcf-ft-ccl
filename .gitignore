@@ -3,6 +3,7 @@
 !*/
 !.gitignore
 !README.md
+!oneccl_minimal_requirements.md
 !scripts/*.sh
 !scripts/functionality/*.sh
 !src/*.cpp
